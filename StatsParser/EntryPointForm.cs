@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Drawing;
 using System.Windows.Forms;
+using System.Collections.Generic;
 
 namespace StatsParser
 {
@@ -15,14 +15,19 @@ namespace StatsParser
         {
             string gameID = this.GameIDTextBox.Text;
 
-            MonitorParser mp1 = new MonitorParser(gameID);
-            var table = mp1.ParseStats();
+            if (gameID != string.Empty)
+            {// get types of lvls
+                Dictionary<int, string> typesOfLvls = ExcelOperational.GetGameLvlsSpec("TypesOfLvls.xlsx");
+                StatsParser parser = new StatsParser(gameID, typesOfLvls);
+                Dictionary<string, List<(string TeamName, TimeSpan TimeResult)>> finalTable = parser.GetFinalTable();
 
-        }
-
-        private void EntryPointForm_Paint(object sender, PaintEventArgs e)
-        {
-            e.Graphics.FillRectangle(new SolidBrush(Color.Black), 0, 0, 369, 195);
+                // save stats
+                ExcelOperational.WriteToExcel(finalTable, gameID.Split('=')[1]);
+            }
+            else
+            {
+                MessageBox.Show("Game URL can't be empty!", "Warning!", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
     }
 }

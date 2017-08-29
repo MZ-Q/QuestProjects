@@ -2,130 +2,113 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Drawing;
 using System.Text.RegularExpressions;
-using Microsoft.Office.Interop.Excel;
-using System.Runtime.InteropServices;
 
 namespace StatsParser
 {
-    class MonitorParser
+    public class StatsParser
     {
-        private string m_gameURL;
+        private readonly Dictionary<int, string> m_typesOfLvls;
+        private readonly string m_gameURL;
+        private DateTime m_startTime;
+        private string m_gameType; // "В одиночку" || "Командами"
 
-        public MonitorParser(string gameURL) => m_gameURL = gameURL;
-
-        public struct TeamResult
+        public StatsParser(string gameURL, Dictionary<int, string> lvlsSpec)
         {
-            private string teamName;
-            private TimeSpan timeResult;
+            m_gameURL = gameURL;
+            m_typesOfLvls = lvlsSpec;
 
-            public TeamResult(string tn, TimeSpan tr)
-            {
-                teamName = tn;
-                timeResult = tr;
-            }
-
-            public TimeSpan TimeResult { get => timeResult; set => timeResult = value; }
-            public string TeamName { get => teamName; set => teamName = value; }
-        };
-
-        private DateTime getStartTime()
-        {
+            // get game description from the main page:
             System.Net.WebClient client = new System.Net.WebClient();
 
             var mainPageData = client.DownloadData(m_gameURL);
             var mainPageHtml = Encoding.UTF8.GetString(mainPageData);
             HtmlAgilityPack.HtmlDocument mainPageDoc = new HtmlAgilityPack.HtmlDocument();
             mainPageDoc.LoadHtml(mainPageHtml);
-            var spanNodes = mainPageDoc.DocumentNode.SelectNodes("//span[@class='white']");
+            var spanNodes = mainPageDoc.DocumentNode.SelectNodes(xpath: "//span[@class='white']");
 
             List<string> strNodes = new List<string>();
-                
+
             foreach (var node in spanNodes)
                 strNodes.Add(node.InnerText);
 
             string startTimeString = strNodes.Find(x => x.Contains("UTC"));
-            startTimeString = startTimeString.Substring(0, startTimeString.IndexOf("(") - 1).Replace(".", "/");
+            m_startTime = Convert.ToDateTime(startTimeString.Substring(0, startTimeString.IndexOf("(") - 1).Replace(".", "/"));
 
-            return Convert.ToDateTime(startTimeString);
+            string gameTypeString = strNodes.Find(x => x.Contains("Командами") || x.Contains("В одиночку"));
+            m_gameType = new string(gameTypeString.Where(c => !char.IsControl(c)).ToArray());
         }
 
-        private Dictionary<int, string> getLvlsSpec(string fileName)
+        // GetFinalTable in format: dict key: type of lvl -> value: list of tuples(team, team's result on this lvl)
+        public Dictionary<string, List<(string TeamName, TimeSpan TimeResult)>> GetFinalTable()
         {
-            Dictionary<int, string> typesOfLvls = new Dictionary<int, string>();
+            // get table with timespans first
+            List<List<(string TeamName, TimeSpan TimeResult)>> LvlsOfTeamsFinal = ParseStats();
 
-            //create the Application object we can use in the member functions.
-            Microsoft.Office.Interop.Excel.Application _excelApp = new Microsoft.Office.Interop.Excel.Application();
-            _excelApp.Visible = true;
+            Dictionary<string, List<(string TeamName, TimeSpan TimeResult)>> finalTable = new Dictionary<string, List<(string, TimeSpan)>>();
 
-            var xlWorkBooks = _excelApp.Workbooks;
+            for (int i = 0; i < LvlsOfTeamsFinal.Count; i++)
+            {
+                // skip lvl if we have no spec for it
+                if (!m_typesOfLvls.ContainsKey(i + 1))
+                    continue;
 
-            //open the workbook
-            Workbook xlWorkBook = xlWorkBooks.Open(fileName,
-                Type.Missing, Type.Missing, Type.Missing, Type.Missing,
-                Type.Missing, Type.Missing, Type.Missing, Type.Missing,
-                Type.Missing, Type.Missing, Type.Missing, Type.Missing,
-                Type.Missing, Type.Missing);
+                m_typesOfLvls.TryGetValue(i + 1, out string curType);
 
-            //select the first sheet        
-            Worksheet xlWorkSheet = xlWorkBook.Worksheets[1];
+                if (!finalTable.ContainsKey(curType))
+                {
+                    finalTable.Add(curType, LvlsOfTeamsFinal[i]);
+                }
+                else
+                {
+                    var curReadyData = new List<(string TeamName, TimeSpan TimeResult)>();
+                    finalTable.TryGetValue(curType, out curReadyData);
 
-            //find the used range in worksheet
-            Range excelRange = xlWorkSheet.UsedRange;
+                    for (int j = 0; j < curReadyData.Count; j++)
+                    {
+                        string teamName = curReadyData[j].TeamName;
+                        TimeSpan spanToAdd = LvlsOfTeamsFinal[i].Find(x => x.TeamName == teamName).TimeResult;
+                        curReadyData[j] = (curReadyData[j].TeamName, curReadyData[j].TimeResult + spanToAdd);
+                    }
+                }
+            }
 
-            //get an object array of all of the cells in the worksheet (their values)
-            object[,] valueArray = (object[,])excelRange.get_Value(
-                        XlRangeValueDataType.xlRangeValueDefault);
+            // get bounuses and penalties from the winners after-game table and combine them with existing stats
+            var bonusesAndPenalties = GetBonusesAndPenalties();
 
-            //access the cells
-            for (int row = 1; row <= xlWorkSheet.UsedRange.Rows.Count; ++row)
-                typesOfLvls.Add(Convert.ToInt32(valueArray[row, 1]), valueArray[row, 2].ToString());
+            // we could guarantee that there is no duplicate key in bonuses and penalties table
+            foreach (var bonusesPair in bonusesAndPenalties)
+                finalTable.Add(bonusesPair.Key, bonusesPair.Value);
 
-            //clean up stuffs
-            Marshal.ReleaseComObject(xlWorkSheet);
-            xlWorkBook.Close(false, Type.Missing, Type.Missing);
-            Marshal.ReleaseComObject(xlWorkBook);
-            Marshal.ReleaseComObject(xlWorkBooks);
-
-            _excelApp.Quit();
-            Marshal.FinalReleaseComObject(_excelApp);
-
-            return typesOfLvls;
+            return finalTable;
         }
 
-        public List<List<TeamResult>> ParseStats()
+        #region Private helpers
+        private List<List<(string, TimeSpan)>> ParseStats()
         {
             System.Net.WebClient client = new System.Net.WebClient();
 
             // Get HTML table as it is
-            var gameStatsData = client.DownloadData(m_gameURL.Replace("GameDetails", "GameStat")); //GameWinners   
+            var gameStatsData = client.DownloadData(m_gameURL.Replace("GameDetails", "GameStat"));
             var gameStatsHtml = Encoding.UTF8.GetString(gameStatsData);
 
             HtmlAgilityPack.HtmlDocument gameStatsDoc = new HtmlAgilityPack.HtmlDocument();
             gameStatsDoc.LoadHtml(gameStatsHtml);
 
-            List<List<string>> table = gameStatsDoc.DocumentNode.SelectSingleNode("//table[@id='GameStatObject_DataTable']") //'GameStatObject2_DataTable'
+            List<List<string>> table = gameStatsDoc.DocumentNode.SelectSingleNode(xpath: "//table[@id='GameStatObject_DataTable']") // "//table[@id='GameStatObject2_DataTable']"
                         .Descendants("tr")
                         .Skip(1)
                         .Where(tr => tr.Elements("td").Count() > 1)
                         .Select(tr => tr.Elements("td").Select(td => td.InnerText.Trim()).ToList())
                         .ToList();
-            //List<List<string>> table = gameStatsDoc.DocumentNode.SelectSingleNode("//table[@class='table_light']") //'GameStatObject2_DataTable'
-            //            .Descendants("tr")
-            //            .Skip(1)
-            //            .Where(tr => tr.Elements("td").Count() > 1)
-            //            .Select(tr => tr.Elements("td").Select(td => td.InnerText.Trim()).ToList())
-            //            .ToList();
 
             // Transfer HTML table into List(lvls) of lists(teams)
-
-            List<List<Tuple<string, DateTime>>> LvlsOfTeams = new List<List<Tuple<string,DateTime>>>();
-            int numberOfCellsInRow = table[0].Count - 3; // 3 - number of non-functional collumns.
+            List<List<(string, DateTime)>> LvlsOfTeams = new List<List<(string, DateTime)>>();
+            int numberOfCellsInRow = table[0].Count - 3; // 3 - number of non-functional collumns in the end of the table.
 
             for (int j = 1; j < numberOfCellsInRow; j++)
             {
-                List<Tuple<string, DateTime>> oneLvl = new List<Tuple<string, DateTime>>();
+                List<(string, DateTime)> oneLvl = new List<(string, DateTime)>();
 
                 for (int i = 0; i < table.Count - 1; i++)
                 {
@@ -133,49 +116,29 @@ namespace StatsParser
 
                     if (cell == string.Empty)
                         continue;
-                    //................. for personal quest.....................
-                    //int indexOfFirstNumber = cell.IndexOfAny("0123456789".ToCharArray());
-                    //int timeStartIndex = indexOfFirstNumber;
-                    //string cutFromFirstNumber = cell;
 
-                    //while (cutFromFirstNumber[indexOfFirstNumber + 2] != '.')
-                    //{
-                    //    cutFromFirstNumber = cutFromFirstNumber.Substring(indexOfFirstNumber + 1);
-                    //    indexOfFirstNumber = cutFromFirstNumber.IndexOfAny("0123456789".ToCharArray());
-                    //    timeStartIndex += indexOfFirstNumber;
-                    //    timeStartIndex += 1;
-                    //}
+                    // if cell is not empty - we could be sure that it has proper format
+                    string allButTeamName = (m_gameType == "В одиночку") ? Regex.Match(cell, @"\d{2}\.\d{2}\.\d{6}:\d{2}:\d{2}\.\d{1,3}.+", RegexOptions.Singleline).Value
+                                                                         : Regex.Match(cell, @"\(.+\)\d{2}\.\d{2}\.\d{6}:\d{2}:\d{2}\.\d{1,3}.+", RegexOptions.Singleline).Value;
 
-                    //string TeamName = cell.Substring(0, timeStartIndex);
-                    //string[] separators = new string[] { ")", "(", "))", "((" };
-                    //string checkForStupidNames = cell.Split(separators, StringSplitOptions.RemoveEmptyEntries)[0];
-                    //string TimeString = checkForStupidNames.Substring(timeStartIndex);
-
-                    //.............................. for team quest...........................................
-                    string TeamName = cell.Substring(0, cell.IndexOf("("));
-                    
-                    string[] separators = new string[] { ")", "(", "))", "((" };
-                    string checkForStupidNames = cell.Split(separators, StringSplitOptions.RemoveEmptyEntries)[2];
-                    string TimeString = int.TryParse(checkForStupidNames[0].ToString(), out int n) ? cell.Split(separators, StringSplitOptions.RemoveEmptyEntries)[2]
-                                                                                                   : cell.Split(separators, StringSplitOptions.RemoveEmptyEntries)[3];
-                    ///.......................................................................................
-                    var regex = new Regex(Regex.Escape("."));
-                    string formatedTimeString = regex.Replace(TimeString, "/", 2).Insert(10, " "); // 10 - index of hour
+                    string TimeString = Regex.Match(cell, @"\d{2}\.\d{2}\.\d{6}:\d{2}:\d{2}\.\d{1,3}", RegexOptions.Singleline).Value;
+                    string TeamName = cell.Replace(allButTeamName, string.Empty);
+                    Regex regexForTimeString = new Regex(Regex.Escape("."));
+                    string formatedTimeString = regexForTimeString.Replace(TimeString, "/", 2).Insert(10, " "); // 10 - index of hour
                     DateTime TimeOfLVLEnd = Convert.ToDateTime(formatedTimeString);
-                    
-                    oneLvl.Add(new Tuple<string,DateTime>(TeamName, TimeOfLVLEnd));
+
+                    oneLvl.Add((TeamName, TimeOfLVLEnd));
                 }
 
                 LvlsOfTeams.Add(oneLvl);
             }
-            
+
             // Transfer list of lists into list of TimeSpan instead of DateTime.
-            List<List<TeamResult>> LvlsOfTeamsFinal = new List<List<TeamResult>>();
-            DateTime startTime = getStartTime();
+            List<List<(string, TimeSpan)>> LvlsOfTeamsFinal = new List<List<(string, TimeSpan)>>();
 
             for (int i = 0; i < LvlsOfTeams.Count; i++)
             {
-                List<TeamResult> oneLvlFinal = new List<TeamResult>();
+                List<(string, TimeSpan)> oneLvlFinal = new List<(string, TimeSpan)>();
 
                 for (int j = 0; j < LvlsOfTeams[i].Count; j++)
                 {
@@ -185,7 +148,7 @@ namespace StatsParser
 
                     if (i == 0)
                     {
-                        lvlTimeForCurTeam = LvlsOfTeams[i][j].Item2.Subtract(startTime);
+                        lvlTimeForCurTeam = LvlsOfTeams[i][j].Item2.Subtract(m_startTime);
                     }
                     else
                     {
@@ -193,129 +156,80 @@ namespace StatsParser
                         lvlTimeForCurTeam = LvlsOfTeams[i][j].Item2.Subtract(timeOfFinishPrevLvlByCurTeam);
                     }
 
-                    oneLvlFinal.Add(new TeamResult(TeamName, lvlTimeForCurTeam));
+                    oneLvlFinal.Add((TeamName, lvlTimeForCurTeam));
                 }
 
                 LvlsOfTeamsFinal.Add(oneLvlFinal);
             }
 
-            var finalTable = GetFinalTable(LvlsOfTeamsFinal);
-
-            WriteToExcel(finalTable);
             return LvlsOfTeamsFinal;
         }
 
-        // GetFinalTable in format: dict key: type of lvl -> value: list of tuples(team, team's result on this lvl)
-        public Dictionary<string, List<TeamResult>> GetFinalTable(List<List<TeamResult>> LvlsOfTeamsFinal)
+        private Dictionary<string, List<(string, TimeSpan)>> GetBonusesAndPenalties()
         {
-            Dictionary<string, List<TeamResult>> finalTable = new Dictionary<string, List<TeamResult>>();
+            System.Net.WebClient client = new System.Net.WebClient();
 
-            // Get types of lvls
-            string loadDirectory = System.IO.Directory.GetCurrentDirectory() + "\\..\\..\\";
-            var typesOfLvls = getLvlsSpec(loadDirectory + "TypesOfLvls.xlsx");
+            // get HTML table as it is
+            var gameStatsData = client.DownloadData(m_gameURL.Replace("GameDetails", "GameWinners"));   
+            var gameStatsHtml = Encoding.UTF8.GetString(gameStatsData);
 
-            for (int i = 0; i < LvlsOfTeamsFinal.Count; i++)
+            HtmlAgilityPack.HtmlDocument gameStatsDoc = new HtmlAgilityPack.HtmlDocument();
+            gameStatsDoc.LoadHtml(gameStatsHtml);
+
+            List<List<string>> table = gameStatsDoc.DocumentNode.SelectSingleNode(xpath: "//table[@class='table_light']")
+                        .Descendants("tr")
+                        .Skip(1)
+                        .Where(tr => tr.Elements("td").Count() > 1)
+                        .Select(tr => tr.Elements("td").Select(td => td.InnerText.Trim()).ToList())
+                        .ToList();
+
+            List<(string, TimeSpan)> finalBonuses = new List<(string, TimeSpan)>();
+            List<(string, TimeSpan)> finalPenalties = new List<(string, TimeSpan)>();
+
+            for (int i = 0; i < table.Count; i++)
             {
-                if (!typesOfLvls.ContainsKey(i + 1))
-                    continue;
+                //1 - team name; 3 - bonus; 4 - penalty;
+                TimeSpan curBonus = (table[i][3] == "0") ? new TimeSpan(0, 0, 0, 0)
+                                                         : ParseBonusPenaltyTimeStr(table[i][3]);
+                finalBonuses.Add((table[i][1], curBonus));
 
-                typesOfLvls.TryGetValue(i + 1, out string curType);
-
-                if (!finalTable.ContainsKey(curType))
-                {
-                    finalTable.Add(curType, LvlsOfTeamsFinal[i]);
-                }
-                else
-                {
-                    var curReadyData = new List<TeamResult>();
-                    finalTable.TryGetValue(curType, out curReadyData);
-
-                    for (int j = 0; j < curReadyData.Count; j++)
-                    {
-                        string teamName = curReadyData[j].TeamName;
-                        TimeSpan spanToAdd = LvlsOfTeamsFinal[i].Find(x => x.TeamName == teamName).TimeResult;
-                        TeamResult TrToAdd = new TeamResult(curReadyData[j].TeamName, curReadyData[j].TimeResult + spanToAdd);
-                        curReadyData[j] = TrToAdd;
-                    }
-                }
+                TimeSpan curPenalty = (table[i][4] == "0") ? new TimeSpan(0, 0, 0, 0)
+                                                           : ParseBonusPenaltyTimeStr(table[i][4]);
+                finalPenalties.Add((table[i][1], curPenalty));
             }
 
-            return finalTable;
+            Dictionary<string, List<(string, TimeSpan)>> bonusesPenaltiesDict = new Dictionary<string, List<(string, TimeSpan)>>
+            {
+                { "бонусы", finalBonuses },
+                { "штрафы", finalPenalties }
+            };
+
+            return bonusesPenaltiesDict;
         }
 
-        public void WriteToExcel(Dictionary<string, List<TeamResult>> finalTable)
+        private TimeSpan ParseBonusPenaltyTimeStr(string timeStr)
         {
-            Application _excelApp = new Application();
-            _excelApp.Visible = true;
+            List<string> words = timeStr.Split(' ').ToList();
 
-            var xlWorkBooks = _excelApp.Workbooks;
-            var xlWorkBook = xlWorkBooks.Add(Type.Missing);
-            var xlWorkSheets = xlWorkBook.Worksheets;
-            Worksheet xlWorkSheet = xlWorkSheets.get_Item(1);
+            int seconds = GetTimePartFromStrList(new List<string>(new string[] { "секунда", "секунд", "секунды" }));
+            int minutes = GetTimePartFromStrList(new List<string>(new string[] { "мунута", "минут", "минуты" }));
+            int hours   = GetTimePartFromStrList(new List<string>(new string[] { "час", "часов", "часа" }));
+            int days    = GetTimePartFromStrList(new List<string>(new string[] { "день", "дней", "дня" }));
 
-            for (int i = 0; i < finalTable.Count; i++)
+            // need to check manually because any of time part could be absent and also could contains days
+            int GetTimePartFromStrList(List<string> timePartNames)
             {
-                xlWorkSheet.Cells[1, i + 2] = finalTable.ElementAt(i).Key.ToString();
+                int timePart = 0;
+                string timePartStr = words.FirstOrDefault(word => timePartNames.Contains(word));
 
-                for (int j = 0; j < finalTable.ElementAt(i).Value.Count; j++)
-                {
-                    if (i == 0)
-                    {
-                        xlWorkSheet.Cells[j + 2, 1] = finalTable.ElementAt(i).Value[j].TeamName.ToString();
-                        xlWorkSheet.Cells[j + 2, 2] = finalTable.ElementAt(i).Value[j].TimeResult.ToString();
-                    }
-                    else
-                    {
-                        int columnIndex = finalTable.ElementAt(0).Value.FindIndex(x => x.TeamName == finalTable.ElementAt(i).Value[j].TeamName);
-                        xlWorkSheet.Cells[columnIndex + 2, i + 2] = finalTable.ElementAt(i).Value[j].TimeResult.ToString();
-                    }
-                }
+                if (timePartStr != null)
+                    timePart = int.Parse(words[words.IndexOf(timePartStr) - 1]);
 
+                return timePart;
             }
 
-
-            xlWorkSheet.get_Range("A1", "Z1").Font.Bold = true;
-            xlWorkSheet.get_Range("A1", "Z1").VerticalAlignment = XlVAlign.xlVAlignCenter;
-            xlWorkSheet.get_Range("A1", "A105").Font.Bold = true;
-            xlWorkSheet.get_Range("A1", "A105").VerticalAlignment = XlVAlign.xlVAlignCenter;
-            xlWorkSheet.get_Range("A2", "Z100").NumberFormat = "h:mm:ss";
-
-            // Mark best and worst time with green or red brush
-            for (char c = 'B'; c <= 'Z'; c++)
-            {
-                if (c - 'A' > finalTable.Count)
-                    break;
-
-                // Hope all of the teams passed 0-index type of lvls
-                int numberOfTeams = finalTable.ElementAt(0).Value.Count;
-                string bestTimeFormula = string.Format("=${0}2=МИН(${0}$2:${0}${1})", c, numberOfTeams + 1);
-                string worstTimeFormula = bestTimeFormula.Replace("МИН", "МАКС");
-
-                Range range = xlWorkSheet.get_Range(c + "2", c + (numberOfTeams + 1).ToString());
-                FormatConditions fcs = range.FormatConditions;
-                FormatCondition fcW = (FormatCondition)fcs.Add
-                    (XlFormatConditionType.xlExpression, Type.Missing, worstTimeFormula);
-                Interior interiorW = fcW.Interior;
-                interiorW.Color = ColorTranslator.ToOle(Color.Red);
-
-                FormatCondition fcB = (FormatCondition)fcs.Add
-                    (XlFormatConditionType.xlExpression, Type.Missing, bestTimeFormula);
-                Interior interiorB = fcB.Interior;
-                interiorB.Color = ColorTranslator.ToOle(Color.Green);
-            }
-
-            // Save xls
-            string safeDirectory = System.IO.Directory.GetCurrentDirectory() + "\\..\\..\\Statistics\\";
-            xlWorkBook.SaveAs(string.Format(safeDirectory + "Game_ID{0}_stars.xls", m_gameURL.Split('=')[1]));
-
-            // Clean up stuffs
-            Marshal.ReleaseComObject(xlWorkSheet);
-            xlWorkBook.Close(false, Type.Missing, Type.Missing);
-            Marshal.ReleaseComObject(xlWorkBook);
-            Marshal.ReleaseComObject(xlWorkBooks);
-
-            _excelApp.Quit();
-            Marshal.FinalReleaseComObject(_excelApp);
+            return new TimeSpan(days, hours, minutes, seconds);
         }
+        #endregion
     }
 }
