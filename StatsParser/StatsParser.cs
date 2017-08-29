@@ -25,17 +25,12 @@ namespace StatsParser
             var mainPageHtml = Encoding.UTF8.GetString(mainPageData);
             HtmlAgilityPack.HtmlDocument mainPageDoc = new HtmlAgilityPack.HtmlDocument();
             mainPageDoc.LoadHtml(mainPageHtml);
-            var spanNodes = mainPageDoc.DocumentNode.SelectNodes(xpath: "//span[@class='white']");
+            var spanNodes = mainPageDoc.DocumentNode.SelectNodes(xpath: "//span[@class='white']").ToList();
 
-            List<string> strNodes = new List<string>();
-
-            foreach (var node in spanNodes)
-                strNodes.Add(node.InnerText);
-
-            string startTimeString = strNodes.Find(x => x.Contains("UTC"));
+            string startTimeString = spanNodes.Find(x => x.InnerText.Contains("UTC")).InnerText;
             m_startTime = Convert.ToDateTime(startTimeString.Substring(0, startTimeString.IndexOf("(") - 1).Replace(".", "/"));
 
-            string gameTypeString = strNodes.Find(x => x.Contains("Командами") || x.Contains("В одиночку"));
+            string gameTypeString = spanNodes.Find(x => x.InnerText.Contains("Командами") || x.InnerText.Contains("В одиночку")).InnerText;
             m_gameType = new string(gameTypeString.Where(c => !char.IsControl(c)).ToArray());
         }
 

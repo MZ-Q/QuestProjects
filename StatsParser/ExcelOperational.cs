@@ -112,7 +112,7 @@ namespace StatsParser
 
             // save xls
             string safeDirectory = System.IO.Directory.GetCurrentDirectory() + "\\..\\..\\Statistics\\";
-            xlWorkBook.SaveAs(string.Format(safeDirectory + "Game_ID{0}_stars.xls", fileName));
+            xlWorkBook.SaveAs(string.Format(safeDirectory + "Game_ID{0}_stars.xlsx", fileName));
 
             // clean up stuffs
             Marshal.ReleaseComObject(xlWorkSheet);
