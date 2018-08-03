@@ -121,7 +121,6 @@ namespace StatsParser
                     Regex regexForTimeString = new Regex(Regex.Escape("."));
                     string formatedTimeString = regexForTimeString.Replace(TimeString, "/", 2).Insert(10, " "); // 10 - index of hour
                     DateTime TimeOfLVLEnd = Convert.ToDateTime(formatedTimeString);
-
                     oneLvl.Add((TeamName, TimeOfLVLEnd));
                 }
 
@@ -207,7 +206,7 @@ namespace StatsParser
             List<string> words = timeStr.Split(' ').ToList();
 
             int seconds = GetTimePartFromStrList(new List<string>(new string[] { "секунда", "секунд", "секунды" }));
-            int minutes = GetTimePartFromStrList(new List<string>(new string[] { "мунута", "минут", "минуты" }));
+            int minutes = GetTimePartFromStrList(new List<string>(new string[] { "минута", "минут", "минуты" }));
             int hours   = GetTimePartFromStrList(new List<string>(new string[] { "час", "часов", "часа" }));
             int days    = GetTimePartFromStrList(new List<string>(new string[] { "день", "дней", "дня" }));
 
