@@ -92,10 +92,20 @@ namespace StatsParser
             // mark best and worst time with green or red color
             for (char c = 'B'; c - 'A' <= finalTable.Count; c++)
             {
+                string cellValue = (string)(xlWorkSheet.Cells[1, c - 'A' + 1] as Range).Value;
+                if (cellValue == null)
+                    continue;
                 // Hope all of the teams passed 0-index type of lvls
                 int numberOfTeams = finalTable.ElementAt(0).Value.Count;
                 string bestTimeFormula = string.Format("=${0}2=МИН(${0}$2:${0}${1})", c, numberOfTeams + 1);
                 string worstTimeFormula = bestTimeFormula.Replace("МИН", "МАКС");
+
+                if (cellValue == "бонусы")
+                {
+                    string tmp = bestTimeFormula;
+                    bestTimeFormula = worstTimeFormula;
+                    worstTimeFormula = tmp;
+                }
 
                 Range range = xlWorkSheet.get_Range(c + "2", c + (numberOfTeams + 1).ToString());
                 FormatConditions fcs = range.FormatConditions;
